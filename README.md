@@ -4,10 +4,18 @@ A standalone [Strands](https://strandsagents.com/) sandbox extension for
 [Sprites](https://sprites.dev/). Run an agent's shell commands and file operations
 inside an existing Sprite, with files that persist between commands and agent runs.
 
-## Install from source
+## Install
 
-This package is not yet published to PyPI. It requires Python 3.10 or later,
-`strands-agents>=1.59.0,<2`, and `sprites-py>=0.7.2,<1`.
+<!-- Installation instructions updated by Codex. -->
+
+Requires Python 3.10 or later, `strands-agents>=1.59.0,<2`, and
+`sprites-py>=0.7.2,<1`.
+
+```sh
+python -m pip install strands-sprites
+```
+
+To install from source instead:
 
 ```sh
 git clone https://github.com/superfly/strands-sprites.git
