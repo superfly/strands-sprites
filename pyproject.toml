@@ -1,0 +1,81 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "strands-sprites"
+version = "0.1.0"
+description = "Persistent Sprites sandboxes for Strands agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{name = "Alex Ezell", email = "alex@fly.io"}]
+keywords = ["strands", "sprites", "agents", "sandbox"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
+dependencies = ["strands-agents>=1.59.0,<2", "sprites-py>=0.7.2,<1"]
+
+[project.urls]
+Repository = "https://github.com/superfly/strands-sprites"
+Documentation = "https://github.com/superfly/strands-sprites#readme"
+Issues = "https://github.com/superfly/strands-sprites/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10", "pytest-asyncio>=1,<2", "pytest-cov>=6,<8",
+    "pytest-timeout>=2,<3", "ruff>=0.16,<0.17", "mypy>=1.15,<2.4",
+    "build>=1,<2", "twine>=7,<8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/strands_sprites"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "examples", "README.md", "LICENSE", "pyproject.toml"]
+
+[tool.hatch.envs.default]
+installer = "uv"
+features = ["dev"]
+
+[tool.hatch.envs.default.scripts]
+test = "pytest {args}"
+lint = "ruff check ."
+format = "ruff format ."
+format-check = "ruff format --check ."
+typecheck = "mypy src"
+prepare = ["format-check", "lint", "typecheck", "test"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "--strict-markers"
+timeout = 15
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+follow_imports = "silent"
+
+[tool.coverage.run]
+source = ["strands_sprites"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
