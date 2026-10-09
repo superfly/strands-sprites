@@ -76,3 +76,26 @@ def test_disconnect_terminates_descendants(tmp_path, signum):
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="The remote supervisor requires POSIX")
+@pytest.mark.parametrize("directory_exists", [False, True])
+def test_invalid_cwd_returns_one_line_without_traceback(tmp_path, directory_exists):
+    cwd = tmp_path / "invalid-cwd"
+    if directory_exists:
+        cwd.write_text("a file is not a working directory")
+    result = subprocess.run(
+        [sys.executable, "-c", COMMAND_RUNNER],
+        input=json.dumps(
+            {"command": "echo must-not-run", "env": {}, "cwd": str(cwd), "timeout": 1, "marker": "deadline-marker"}
+        ).encode(),
+        capture_output=True,
+        timeout=3,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert len(result.stderr.splitlines()) == 1
+    assert b"could not start" in result.stderr
+    assert b"Traceback" not in result.stderr
+    assert b"deadline-marker" not in result.stderr

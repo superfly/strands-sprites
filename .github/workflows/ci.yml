@@ -55,7 +55,7 @@ jobs:
           .venv/bin/python -I -c "from strands_sprites import SpritesSandbox; print(SpritesSandbox.__name__)"
 
   sdk-compat:
-    name: Latest Strands SDK compatibility
+    name: Latest SDK compatibility
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
@@ -66,11 +66,11 @@ jobs:
         with:
           python-version: '3.14'
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-      - name: Install newest published SDK
+      - name: Install newest published SDKs
         run: |
           uv venv .venv
           uv pip install --python .venv/bin/python -e '.[dev]'
-          uv pip install --python .venv/bin/python --upgrade strands-agents
+          uv pip install --python .venv/bin/python --upgrade strands-agents sprites-py
           uv pip check --python .venv/bin/python
       - run: |
           .venv/bin/python -m mypy src scripts

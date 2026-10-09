@@ -417,3 +417,51 @@ async def test_large_code_and_secret_environment_through_sdk_websocket(monkeypat
         with pytest.raises(SandboxTimeoutError):
             await sandbox.execute("sleep 5", timeout=0.1)
     assert len(urls) == 2
+
+
+@pytest.mark.asyncio
+async def test_oversized_write_is_rejected_before_io():
+    sprite = mock_sprite()
+    sandbox = SpritesSandbox(sprite, working_dir="/workspace")
+    with pytest.raises(ValueError, match="16 MiB"):
+        await sandbox.write_file("large.bin", b"x" * (16 * 1024 * 1024 + 1))
+    sprite.filesystem.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_write_at_limit_is_allowed():
+    from unittest.mock import AsyncMock
+
+    sprite = mock_sprite()
+    write = AsyncMock()
+    sprite.filesystem.return_value.path.return_value.write_bytes = write
+    content = b"x" * (16 * 1024 * 1024)
+    await SpritesSandbox(sprite, working_dir="/workspace").write_file("large.bin", content)
+    write.assert_awaited_once_with(content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status, code, operation, expected, message",
+    [
+        (400, "ENOTDIR", "read_file", NotADirectoryError, "not a directory"),
+        (400, "ENOTDIR", "list_files", SandboxPathNotFoundError, "target"),
+        (403, "EACCES", "write_file", PermissionError, "permission denied"),
+        (500, None, "read_file", OSError, "connectivity"),
+    ],
+)
+async def test_filesystem_errors_are_actionable_and_sanitized(caplog, status, code, operation, expected, message):
+    def handle(request):
+        return httpx.Response(status, json={"code": code, "error": "private-token-and-url"})
+
+    async with AsyncSpritesClient(token="test-token") as client:
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        sandbox = SpritesSandbox(client.sprite("test-sprite"), working_dir="/workspace")
+        args = ("target", b"content") if operation == "write_file" else ("target",)
+        with pytest.raises(expected, match=message) as error:
+            await getattr(sandbox, operation)(*args)
+        assert "private-token-and-url" not in str(error.value)
+        assert error.value.__suppress_context__
+        if status == 500:
+            assert "private-token-and-url" in caplog.text

@@ -44,6 +44,8 @@ from ._runner import COMMAND_RUNNER
 
 logger = logging.getLogger(__name__)
 
+MAX_WRITE_BYTES = 16 * 1024 * 1024
+
 
 class _OutputSink:
     """Decode streaming bytes and remove the private remote deadline marker."""
@@ -171,7 +173,9 @@ class SpritesSandbox(PosixShellSandbox):
             return await self.sprite.filesystem(self.working_dir).path(path).read_bytes()
 
     async def write_file(self, path: str, content: bytes, **kwargs: Any) -> None:
-        """Write a binary HTTP body, creating missing parent directories."""
+        """Write up to 16 MiB, creating missing parent directories."""
+        if len(content) > MAX_WRITE_BYTES:
+            raise ValueError("Sprite file write exceeds the 16 MiB (16,777,216 bytes) limit.")
         with _filesystem_errors(path):
             await self.sprite.filesystem(self.working_dir).path(path).write_bytes(content)
 

@@ -58,7 +58,7 @@ test = "pytest {args}"
 lint = "ruff check ."
 format = "ruff format ."
 format-check = "ruff format --check ."
-typecheck = "mypy src"
+typecheck = "mypy src scripts"
 prepare = ["format-check", "lint", "typecheck", "test"]
 
 [tool.pytest.ini_options]

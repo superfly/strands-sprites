@@ -32,14 +32,19 @@ payload = json.load(sys.stdin)
 script = tempfile.TemporaryFile()
 script.write(payload["command"].encode())
 script.seek(0)
-process = subprocess.Popen(
-    ["sh", "/dev/fd/" + str(script.fileno())],
-    stdin=subprocess.DEVNULL,
-    pass_fds=(script.fileno(),),
-    env={**os.environ, **payload["env"]},
-    cwd=payload["cwd"],
-    start_new_session=True,
-)
+try:
+    process = subprocess.Popen(
+        ["sh", "/dev/fd/" + str(script.fileno())],
+        stdin=subprocess.DEVNULL,
+        pass_fds=(script.fileno(),),
+        env={**os.environ, **payload["env"]},
+        cwd=payload["cwd"],
+        start_new_session=True,
+    )
+except OSError as error:
+    reason = os.strerror(error.errno) if error.errno is not None else "operating system error"
+    sys.stderr.write("Sprite command could not start: " + reason + ". Check the working directory and shell.\n")
+    sys.exit(1)
 if pending_signal is not None:
     stop(pending_signal, None)
 try:

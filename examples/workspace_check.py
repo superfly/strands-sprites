@@ -1,4 +1,4 @@
-"""Verify persistent Sprite files with two commands and no model call."""
+"""Verify Sprite execution and filesystem contracts without a model call."""
 
 import argparse
 import asyncio
@@ -14,6 +14,10 @@ from strands_sprites import SpritesSandbox
 async def check_workspace(sandbox: SpritesSandbox) -> None:
     path = f"{sandbox.working_dir.rstrip('/')}/.strands-sprites-check-{uuid.uuid4().hex}"
     quoted = shlex.quote(path)
+    directory = path + "-dir"
+    nested = directory + "/new_dir/file.txt"
+    script = directory + "/script.sh"
+    tools = {tool.tool_name: tool for tool in sandbox.get_tools()}
     try:
         written = await sandbox.execute(f"printf '%s' 'persistent workspace' > {quoted}", timeout=30)
         if written.exit_code != 0:
@@ -28,8 +32,53 @@ async def check_workspace(sandbox: SpritesSandbox) -> None:
         environment = await sandbox.execute('test "$X" = 1 && test -n "$PATH"', env={"X": "1"}, timeout=30)
         if environment.exit_code != 0:
             raise RuntimeError("Workspace check failed its environment inheritance check.")
+        await sandbox.write_file(nested, b"created by API\n")
+        if await sandbox.read_file(nested) != b"created by API\n":
+            raise RuntimeError("Workspace check failed to create missing parent directories.")
+        ownership = await tools["sandbox_shell"](
+            command=(
+                "python3 -c "
+                + shlex.quote("import os; assert os.stat(" + repr(nested) + ").st_uid == os.getuid()")
+                + " && printf '%s' 'changed by shell' >> "
+                + shlex.quote(nested)
+            ),
+            tool_context=None,
+            timeout=30,
+        )
+        if ownership["exit_code"] != 0 or await sandbox.read_file(nested) != b"created by API\nchanged by shell":
+            raise RuntimeError(
+                "Workspace check failed: API-written files must belong to and be writable by the shell user."
+            )
+        created = await sandbox.execute(
+            "printf '%s' "
+            + shlex.quote("#!/bin/sh\nprintf '%s' before\n")
+            + " > "
+            + shlex.quote(script)
+            + " && chmod 0755 "
+            + shlex.quote(script),
+            timeout=30,
+        )
+        if created.exit_code != 0:
+            raise RuntimeError("Workspace check could not create its executable script.")
+        await tools["sandbox_file_editor"](
+            command="str_replace",
+            path=script,
+            old_str="before",
+            new_str="after",
+            tool_context=None,
+        )
+        mode_check = await sandbox.execute(
+            "python3 -c "
+            + shlex.quote("import os,stat; assert stat.S_IMODE(os.stat(" + repr(script) + ").st_mode) == 0o755"),
+            timeout=30,
+        )
+        executed = await tools["sandbox_shell"](command=shlex.quote(script), tool_context=None, timeout=30)
+        if mode_check.exit_code != 0 or executed["exit_code"] != 0 or executed["output"] != "after":
+            raise RuntimeError("Workspace check failed: editing a 0755 script must preserve its executable mode.")
     finally:
-        await sandbox.remove_file(path)
+        cleanup = await sandbox.execute("rm -rf -- " + quoted + " " + shlex.quote(directory), timeout=30)
+        if cleanup.exit_code != 0:
+            raise RuntimeError("Workspace check could not remove its temporary files.")
 
 
 async def main() -> None:
@@ -45,7 +94,10 @@ async def main() -> None:
     async with AsyncSpritesClient(token=token) as client:
         sandbox = SpritesSandbox(client.sprite(args.sprite), working_dir=args.working_dir)
         await check_workspace(sandbox)
-    print("Workspace check passed: persistent files, 1 MiB filesystem transfer, and environment inheritance.")
+    print(
+        "Workspace check passed: persistent files, 1 MiB transfer, environment inheritance, "
+        "parent creation, file ownership, shell writes, and executable mode preservation."
+    )
 
 
 if __name__ == "__main__":

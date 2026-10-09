@@ -6,8 +6,6 @@ inside an existing Sprite, with files that persist between commands and agent ru
 
 ## Install
 
-<!-- Installation instructions updated by Codex. -->
-
 Requires Python 3.10 or later, `strands-agents>=1.59.0,<2`, and
 `sprites-py>=0.7.2,<1`.
 
@@ -32,6 +30,8 @@ The supervisor starts in the Sprite's default directory before selecting the
 command's directory and environment. Its Python must work there; a project's
 pyenv settings can still affect interpreters launched by the command itself.
 File operations use the filesystem API and do not require Python or a shell.
+Each file write is limited to 16 MiB (16,777,216 bytes); larger writes are rejected
+before making a network request.
 
 Use an `AsyncSpritesClient` with `control_mode=False` (the default). The extension
 rejects control-mode clients because supported SDK releases can drop streamed
@@ -85,10 +85,12 @@ python examples/workspace_check.py
 python examples/workspace_check.py --sprite my-sprite --working-dir /home/sprite
 ```
 
-This check writes a uniquely named temporary file, reads it in a separate command,
-round-trips 1 MiB through the filesystem API, checks that a command-specific
-variable preserves PATH, and removes the file. It needs only Sprites credentials;
-it does not call a model.
+This check uses uniquely named temporary files to verify persistence, a 1 MiB
+filesystem round-trip, environment inheritance, and missing parent directory
+creation. It also verifies that API-written files belong to the shell user and
+can be changed through `sandbox_shell`, and that editing a 0755 script through
+`sandbox_file_editor` preserves its mode. It removes its temporary files and
+directories afterward. It needs only Sprites credentials; it does not call a model.
 
 ## Execution and lifecycle
 
@@ -130,7 +132,7 @@ python -m pip install -e '.[dev]'
 python -m pytest --cov=strands_sprites
 python -m ruff check .
 python -m ruff format --check .
-python -m mypy src
+python -m mypy src scripts
 python -m build
 python -m twine check dist/*
 ```
@@ -140,39 +142,11 @@ and tests. Tests use mocks and local POSIX subprocesses; they do not require clo
 credentials. CI tests Python 3.10–3.14 and resolves minimum direct dependencies
 from scratch with `uv pip install --resolution lowest-direct`. Pull requests run
 CI once; pushes run it only on `main`. A weekly job checks the latest published
-Strands SDK for compatibility.
+Strands and Sprites SDKs for compatibility.
 
-## Releases and catalog submission
+## Releases
 
-Versions come from Git tags through `hatch-vcs`: `v0.1.0` builds version `0.1.0`.
-Use a full Git checkout for development builds. Source distributions retain their
-version metadata and can be built without Git. Untagged commits get development
-versions; the publishing workflow rejects them.
-
-Before the first release, register a pending trusted publisher in PyPI:
-
-| Setting | Value |
-| --- | --- |
-| Project name | `strands-sprites` |
-| GitHub owner | `superfly` |
-| Repository | `strands-sprites` |
-| Workflow filename | `publish.yml` |
-| Environment | `pypi` |
-
-This is configured in the PyPI account that will own the new project, under
-[Publishing](https://pypi.org/manage/account/publishing/). No API token is needed.
-See the [PyPI trusted publishing guide](https://docs.pypi.org/trusted-publishers/).
-
-Once publishing is approved and the trusted publisher is configured, create a
-`vX.Y.Z` tag on a tested commit from `main` and publish its GitHub release. The
-`publish.yml` workflow verifies main ancestry, runs checks, builds the wheel and
-source archive, verifies that both versions match the tag, and uploads them through
-PyPI trusted publishing. Pushing a tag alone does not publish a package.
-
-The Strands catalog entry uses `integrationType: integration` and
-`maintainedBy: partner`. Submit it after the package is available on PyPI and this
-repository is public, and set `addedDate` to the submission date. The repository
-should carry the `strands-agents` topic.
+See [RELEASING.md](https://github.com/superfly/strands-sprites/blob/main/RELEASING.md) for the maintainer release process.
 
 ## License
 
