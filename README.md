@@ -17,10 +17,17 @@ python -m venv .venv
 python -m pip install .
 ```
 
-The Sprite must already exist and have `python3` and `sh` on PATH. Choose an
-existing absolute working directory, such as `/home/sprite`. If the Sprite uses
-pyenv, `.python-version` and `PYENV_VERSION` must select an installed interpreter:
-the process supervisor needs Python even for shell and file operations.
+The Sprite must already exist. Shell and code execution require `python3` and
+`sh` on the Sprite's default PATH, plus its standard `/dev/fd` filesystem.
+Choose an existing absolute working directory, such as `/home/sprite`.
+The supervisor starts in the Sprite's default directory before selecting the
+command's directory and environment. Its Python must work there; a project's
+pyenv settings can still affect interpreters launched by the command itself.
+File operations use the filesystem API and do not require Python or a shell.
+
+Use an `AsyncSpritesClient` with `control_mode=False` (the default). The extension
+rejects control-mode clients because supported SDK releases can drop streamed
+output in that mode.
 
 ## Use with an agent
 
@@ -50,9 +57,13 @@ async def main():
 asyncio.run(main())
 ```
 
-The sandbox registers `sprite_shell` and `sprite_file_editor` automatically.
-Their names distinguish them from tools that execute locally. File and code
-operations use Strands' `PosixShellSandbox` implementations.
+The sandbox registers Strands' standard `sandbox_shell` and `sandbox_file_editor`
+tools automatically, using the SDK descriptions with the Sprite's name appended.
+File operations use the Sprites filesystem API, including directory metadata.
+Code execution uses Strands' `PosixShellSandbox` interpreter command generation.
+
+If you used the initial prototype, update any tool-name references from
+`sprite_shell`/`sprite_file_editor` to `sandbox_shell`/`sandbox_file_editor`.
 
 A runnable version is in [examples/agent.py](examples/agent.py).
 
@@ -67,7 +78,9 @@ python examples/workspace_check.py --sprite my-sprite --working-dir /home/sprite
 ```
 
 This check writes a uniquely named temporary file, reads it in a separate command,
-and removes it. It needs only Sprites credentials; it does not call a model.
+round-trips 1 MiB through the filesystem API, checks that a command-specific
+variable preserves PATH, and removes the file. It needs only Sprites credentials;
+it does not call a model.
 
 ## Execution and lifecycle
 
@@ -75,6 +88,11 @@ and removes it. It needs only Sprites credentials; it does not call a model.
   deletes a Sprite or closes the client. Keep the client open for the agent's lifetime.
 - Files persist in the Sprite. Each command starts a fresh shell, so shell variables
   and `cd` do not persist. Use `working_dir`, or the per-command `cwd` and `env` options.
+  The supervisor explicitly merges `env` over its inherited environment.
+- Commands, code, working directories and environment values travel as a JSON
+  payload over WebSocket stdin. They are not placed in the exec URL. The supervisor
+  runs commands from an unnamed temporary script, avoiding OS argument-size limits.
+  File writes send raw bytes in an HTTP body, avoiding base64 command-size limits.
 - `working_dir` selects a directory; it does not restrict filesystem access.
   Commands run with the Sprite user's permissions.
 - Shell output streams asynchronously. The final result preserves whitespace and
@@ -86,7 +104,9 @@ and removes it. It needs only Sprites credentials; it does not call a model.
   `timeout=None` means there is no command deadline.
 - The SDK transport gets an additional 30 seconds beyond a finite command deadline.
   Transport failures raise a sanitized `RuntimeError` reporting unknown execution
-  status, and are logged locally with the SDK traceback. There are no automatic retries.
+  status. HTTP 401, 403, 404 and 429 responses instead identify authentication,
+  authorization, missing resources and rate limits. SDK failures are logged locally
+  with their traceback. There are no automatic retries.
 - Cancellation closes the transport. Remote cleanup follows the platform's disconnect
   grace period, and the supervisor forwards termination to the command process group.
   Cancellation is not an immediate acknowledgement that remote execution has stopped.

@@ -2,27 +2,43 @@
 
 Install the ``strands-sprites`` extension. The caller owns the AsyncSprite and its
 client; this adapter never creates or deletes Sprites or closes that client.
-The Sprite must have a working ``python3`` and ``sh`` on PATH, including when
-workspace pyenv settings select an interpreter. Working directories are not
+Shell execution needs working ``python3`` and ``sh`` on the default PATH.
+File operations use the filesystem API. Working directories are not
 filesystem security boundaries.
 """
 
 import asyncio
 import codecs
+import io
+import json
 import logging
 import math
-import re
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from sprites import AsyncCmd, AsyncSprite
-from sprites.exceptions import ExitError, SpriteError
+from sprites.exceptions import (
+    APIError,
+    AuthenticationError,
+    ExitError,
+    FileNotFoundError_,
+    IsADirectoryError_,
+    NotADirectoryError_,
+    NotFoundError,
+    PermissionError_,
+    SpriteError,
+)
 from strands import SandboxTimeoutError
-from strands.sandbox import ExecutionResult, PosixShellSandbox, StreamChunk, StreamType
+from strands.sandbox import ExecutionResult, FileInfo, PosixShellSandbox, StreamChunk, StreamType
+from strands.sandbox.errors import SandboxPathNotFoundError
+from strands.sandbox.posix_shell import validate_env_keys
 from strands.types.tools import AgentTool
 from strands.vended_tools.file_editor import make_file_editor
+from strands.vended_tools.file_editor.file_editor import DEFAULT_FILE_EDITOR_DESCRIPTION
 from strands.vended_tools.shell import make_shell
+from strands.vended_tools.shell.types import SANDBOX_SHELL_DESCRIPTION
 
 from ._runner import COMMAND_RUNNER
 
@@ -68,6 +84,40 @@ class _OutputSink:
         return "".join(self.parts)
 
 
+def _request_failure(error: Exception) -> str:
+    status = error.status_code if isinstance(error, APIError) else None
+    if isinstance(error, AuthenticationError) or status == 401:
+        return "Sprite request rejected: authentication failed (HTTP 401)."
+    if status == 403:
+        return "Sprite request rejected: authorization failed (HTTP 403)."
+    if isinstance(error, NotFoundError) or status == 404:
+        return "Sprite request rejected: resource not found (HTTP 404)."
+    if status == 429:
+        return "Sprite request rejected: rate limit exceeded (HTTP 429)."
+    return "Sprite request failed; execution status is unknown. Check the Sprite before retrying."
+
+
+@contextmanager
+def _filesystem_errors(path: str, *, listing: bool = False) -> Iterator[None]:
+    try:
+        yield
+    except FileNotFoundError_:
+        if listing:
+            raise SandboxPathNotFoundError(path) from None
+        raise FileNotFoundError(f"Sprite file not found: {path}") from None
+    except NotADirectoryError_:
+        if listing:
+            raise SandboxPathNotFoundError(path) from None
+        raise NotADirectoryError(f"Sprite path is not a directory: {path}") from None
+    except IsADirectoryError_:
+        raise IsADirectoryError(f"Sprite path is a directory: {path}") from None
+    except PermissionError_:
+        raise PermissionError(f"Sprite filesystem permission denied: {path}") from None
+    except SpriteError:
+        logger.warning("Sprite filesystem request failed", exc_info=True)
+        raise OSError("Sprite filesystem request failed; check credentials, permissions and connectivity.") from None
+
+
 async def _run(command: AsyncCmd, stdout: _OutputSink, stderr: _OutputSink) -> int:
     try:
         await command.run()
@@ -76,9 +126,7 @@ async def _run(command: AsyncCmd, stdout: _OutputSink, stderr: _OutputSink) -> i
         return error.exit_code()
     except (SpriteError, TimeoutError) as error:
         logger.warning("error_type=<%s> | sprite execution failed", type(error).__name__, exc_info=True)
-        raise RuntimeError(
-            "Sprite request failed; execution status is unknown. Check the Sprite before retrying."
-        ) from None
+        raise RuntimeError(_request_failure(error)) from None
     finally:
         stdout.finish()
         stderr.finish()
@@ -88,7 +136,7 @@ async def _run(command: AsyncCmd, stdout: _OutputSink, stderr: _OutputSink) -> i
 class SpritesSandbox(PosixShellSandbox):
     """Run shell and file tools in a caller-owned, persistent Sprite.
 
-    File and code operations use the base class's POSIX shell implementations.
+    File operations use the filesystem API. Commands and code travel over stdin.
     Each command starts a fresh process. A remote supervisor kills the command
     process group at its deadline and forwards termination signals on disconnect.
     Cancellation closes the transport; remote cleanup follows the platform's
@@ -105,12 +153,48 @@ class SpritesSandbox(PosixShellSandbox):
             working_dir: Existing absolute directory inside the Sprite.
 
         Raises:
-            ValueError: If the working directory is not absolute.
+            ValueError: If the working directory is not absolute or control mode is enabled.
         """
         if not working_dir.startswith("/") or "\0" in working_dir:
             raise ValueError("working_dir must be an absolute POSIX path")
         self.sprite = sprite
+        self._check_control_mode()
         self.working_dir = working_dir
+
+    def _check_control_mode(self) -> None:
+        if self.sprite.client.control_mode:
+            raise ValueError("SpritesSandbox requires a client with control_mode=False for reliable output streaming")
+
+    async def read_file(self, path: str, **kwargs: Any) -> bytes:
+        """Read bytes through the filesystem API without executing a command."""
+        with _filesystem_errors(path):
+            return await self.sprite.filesystem(self.working_dir).path(path).read_bytes()
+
+    async def write_file(self, path: str, content: bytes, **kwargs: Any) -> None:
+        """Write a binary HTTP body, creating missing parent directories."""
+        with _filesystem_errors(path):
+            await self.sprite.filesystem(self.working_dir).path(path).write_bytes(content)
+
+    async def remove_file(self, path: str, **kwargs: Any) -> None:
+        """Remove a file through the filesystem API."""
+        with _filesystem_errors(path):
+            await self.sprite.filesystem(self.working_dir).path(path).unlink()
+
+    async def list_files(self, path: str, **kwargs: Any) -> list[FileInfo]:
+        """List native directory entries, preserving directory flags and sizes."""
+        remote = self.sprite.filesystem(self.working_dir).path(path)
+        with _filesystem_errors(path, listing=True):
+            # SDK 0.7.2 iterdir() discards metadata, and stat() on a directory
+            # reports its first child. Keep the native list response instead.
+            response = await remote._request(
+                "GET", "/list", "list", params={"path": str(remote), "workingDir": self.working_dir}
+            )
+            entries = response.json().get("entries") or []
+            if any(entry.get("path") == str(remote) and not entry.get("isDir") for entry in entries):
+                raise SandboxPathNotFoundError(path)
+            return [
+                FileInfo(name=entry["name"], is_dir=entry.get("isDir"), size=entry.get("size")) for entry in entries
+            ]
 
     async def execute_streaming(
         self,
@@ -138,27 +222,29 @@ class SpritesSandbox(PosixShellSandbox):
             SandboxTimeoutError: If the remote supervisor confirms the deadline elapsed.
             RuntimeError: If the transport fails and execution status is unknown.
         """
+        self._check_control_mode()
         if timeout is not None and (isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0):
             raise ValueError("timeout must be positive and finite, or None")
         if env:
-            for key in env:
-                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None:
-                    raise ValueError(f"Invalid environment variable name: {key}")
+            validate_env_keys(env)
         queue: asyncio.Queue[StreamChunk | None] = asyncio.Queue()
         marker = f"\n__sprites_timeout_{uuid.uuid4().hex}__\n"
         stdout = _OutputSink(queue, "stdout")
         stderr = _OutputSink(queue, "stderr", marker.encode())
+        payload = json.dumps(
+            {
+                "command": command,
+                "env": env or {},
+                "cwd": cwd if cwd is not None else self.working_dir,
+                "timeout": timeout,
+                "marker": marker,
+            }
+        ).encode()
         remote = self.sprite.command(
             "python3",
             "-c",
             COMMAND_RUNNER,
-            str(timeout),
-            marker,
-            "sh",
-            "-c",
-            command,
-            cwd=cwd if cwd is not None else self.working_dir,
-            env=env,
+            stdin=io.BytesIO(payload),
             timeout=timeout + 30 if timeout is not None else None,
             stdout=stdout,
             stderr=stderr,
@@ -176,22 +262,18 @@ class SpritesSandbox(PosixShellSandbox):
             await asyncio.gather(task, return_exceptions=True)
 
     def get_tools(self) -> list[AgentTool]:
-        """Return shell and file tools whose names explicitly identify the Sprite."""
+        """Return the standard Strands sandbox tools with their Sprite identified."""
         return [
             make_file_editor(
                 sandbox=self,
-                name="sprite_file_editor",
-                description=(
-                    "View, create, and edit files inside the persistent Sprite. "
-                    "Supports view, create, str_replace, and insert. Use absolute paths."
-                ),
+                name="sandbox_file_editor",
+                description=f'{DEFAULT_FILE_EDITOR_DESCRIPTION} Files are in Sprite "{self.sprite.name}".',
             ),
             make_shell(
                 sandbox=self,
-                name="sprite_shell",
+                name="sandbox_shell",
                 description=(
-                    "Run a shell command inside the persistent Sprite and return stdout, stderr, and exit code. "
-                    "Each call starts a fresh shell. "
+                    f'{SANDBOX_SHELL_DESCRIPTION} Runs in Sprite "{self.sprite.name}". '
                     f"Working directory: {self.working_dir}."
                 ),
             ),

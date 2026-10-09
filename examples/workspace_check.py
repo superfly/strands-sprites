@@ -21,6 +21,13 @@ async def check_workspace(sandbox: SpritesSandbox) -> None:
         read = await sandbox.execute(f"cat {quoted}", timeout=30)
         if read.exit_code != 0 or read.stdout != "persistent workspace":
             raise RuntimeError("Workspace check could not read the first command's file.")
+        content = bytes(range(256)) * 4096
+        await sandbox.write_file(path, content)
+        if await sandbox.read_file(path) != content:
+            raise RuntimeError("Workspace check failed its 1 MiB filesystem round-trip.")
+        environment = await sandbox.execute('test "$X" = 1 && test -n "$PATH"', env={"X": "1"}, timeout=30)
+        if environment.exit_code != 0:
+            raise RuntimeError("Workspace check failed its environment inheritance check.")
     finally:
         await sandbox.remove_file(path)
 
@@ -38,7 +45,7 @@ async def main() -> None:
     async with AsyncSpritesClient(token=token) as client:
         sandbox = SpritesSandbox(client.sprite(args.sprite), working_dir=args.working_dir)
         await check_workspace(sandbox)
-    print("Workspace check passed: the second command read the first command's file.")
+    print("Workspace check passed: persistent files, 1 MiB filesystem transfer, and environment inheritance.")
 
 
 if __name__ == "__main__":

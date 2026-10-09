@@ -1,6 +1,8 @@
 """Exercise the remote supervisor using real local POSIX processes."""
 
+import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -20,7 +22,16 @@ from strands_sprites._runner import COMMAND_RUNNER
 )
 def test_remote_supervisor_deadline(deadline, command, expected, marker_present):
     result = subprocess.run(
-        [sys.executable, "-c", COMMAND_RUNNER, deadline, "deadline-marker", "sh", "-c", command],
+        [sys.executable, "-c", COMMAND_RUNNER],
+        input=json.dumps(
+            {
+                "command": command,
+                "timeout": None if deadline == "None" else float(deadline),
+                "marker": "deadline-marker",
+                "env": {},
+                "cwd": None,
+            }
+        ).encode(),
         capture_output=True,
         timeout=3,
         check=False,
@@ -35,12 +46,26 @@ def test_disconnect_terminates_descendants(tmp_path, signum):
     side_effect = tmp_path / "side-effect"
     child = "import pathlib,time; print('ready',flush=True); time.sleep(0.5); pathlib.Path('side-effect').touch()"
     process = subprocess.Popen(
-        [sys.executable, "-c", COMMAND_RUNNER, "10", "deadline-marker", sys.executable, "-c", child],
+        [sys.executable, "-c", COMMAND_RUNNER],
+        stdin=subprocess.PIPE,
         cwd=tmp_path,
         start_new_session=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    process.stdin.write(
+        json.dumps(
+            {
+                "command": shlex.join([sys.executable, "-c", child]),
+                "timeout": 10,
+                "marker": "deadline-marker",
+                "env": {},
+                "cwd": str(tmp_path),
+            }
+        ).encode()
+    )
+    process.stdin.close()
+    process.stdin = None
     try:
         assert process.stdout.readline() == b"ready\n"
         os.killpg(process.pid, signum)
